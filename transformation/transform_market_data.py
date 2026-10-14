@@ -13,6 +13,7 @@ from pyspark.sql.types import DoubleType, IntegerType
 
 S3_BUCKET = "crypto-pipeline-raw-data-neeraj"
 S3_RAW_PREFIX = "raw/"
+S3_PROCESSED_PREFIX = "processed/"
 
 LOCAL_DOWNLOAD_DIR = "data/raw_download"
 LOCAL_OUTPUT_DIR = "data/processed"
@@ -108,6 +109,33 @@ def write_outputs(cleaned, summary, output_dir: str = LOCAL_OUTPUT_DIR):
         os.path.join(output_dir, "daily_summary.parquet"), index=False
     )
 
+def upload_processed_outputs(raw_key: str, output_dir: str = LOCAL_OUTPUT_DIR,
+                             bucket: str = S3_BUCKET) -> list[str]:
+    """
+    Uploads each local Parquet output to S3 under
+    processed/<dataset>/YYYY/MM/DD/<source file name>.parquet.
+    The date and file name come from the raw file's key, so processed data
+    lines up with its source and re-running overwrites instead of duplicating.
+    Returns the list of S3 keys written.
+    """
+    # raw_key looks like raw/2026/10/05/market_data_<timestamp>.json
+    date_path = "/".join(raw_key.split("/")[1:-1])
+    stem = os.path.splitext(os.path.basename(raw_key))[0]
+
+    s3_client = boto3.client("s3")
+    uploaded_keys = []
+
+    for dataset in ("cleaned_coins", "daily_summary"):
+        local_path = os.path.join(output_dir, f"{dataset}.parquet")
+        key = f"{S3_PROCESSED_PREFIX}{dataset}/{date_path}/{stem}.parquet"
+        try:
+            s3_client.upload_file(local_path, bucket, key)
+        except Exception as e:
+            raise RuntimeError(f"Failed to upload {local_path} to s3://{bucket}/{key}: {e}") from e
+        uploaded_keys.append(key)
+
+    return uploaded_keys
+
 def main():
     print("Finding latest raw file in S3...")
     latest_key = get_latest_raw_key()
@@ -128,6 +156,9 @@ def main():
 
     write_outputs(cleaned, summary)
     print(f"Wrote outputs to {LOCAL_OUTPUT_DIR}/")
+
+    for key in upload_processed_outputs(latest_key):
+        print(f"Uploaded to s3://{S3_BUCKET}/{key}")
 
     spark.stop()
 
